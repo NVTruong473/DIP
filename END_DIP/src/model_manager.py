@@ -8,7 +8,7 @@ class ModelManager:
     """Downloads public model artifacts once and keeps them in Drive."""
 
     SIGN_REPO = "liamxdev/vtsr"
-    HELMET_REPO = "nnsohamnn/helmet-detection-yolo11"
+    PLATE_REPO = "Koushim/yolov8-license-plate-detection"
     SCENE_REPO = "Ultralytics/YOLO11"
 
     def __init__(self, models_dir: str):
@@ -23,23 +23,20 @@ class ModelManager:
         )
 
     def sign_model(self) -> str:
-        # FP16 TorchScript is a good fit for a Colab T4 and avoids a
+        # FP16 TorchScript is a good fit for Colab T4 and avoids a
         # hardware-specific TensorRT engine.
         return self._hf(self.SIGN_REPO, "vtsr.torchscript")
 
     def sign_mapping(self) -> str:
         return self._hf(self.SIGN_REPO, "label-mapping.json")
 
-    def helmet_model(self, prefer_finetuned: bool = True) -> str:
-        fine = self.models_dir / "helmet_best.pt"
+    def plate_model(self, prefer_finetuned: bool = True) -> str:
+        # If the user fine-tunes on a Vietnamese car-plate dataset, this file
+        # automatically overrides the general pretrained detector.
+        fine = self.models_dir / "plate_best.pt"
         if prefer_finetuned and fine.exists():
             return str(fine)
-        # Small checkpoint is the default for video speed; the same repository
-        # also provides a larger 100-epoch YOLO11m checkpoint.
-        return self._hf(self.HELMET_REPO, "yolov11s(80 epochs).pt")
-
-    def helmet_model_m(self) -> str:
-        return self._hf(self.HELMET_REPO, "yolov11m(100epochs).pt")
+        return self._hf(self.PLATE_REPO, "best.pt")
 
     def scene_model(self) -> str:
         return self._hf(self.SCENE_REPO, "yolo11n.pt")
