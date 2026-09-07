@@ -144,19 +144,19 @@ class VideoProcessor:
                     self._log(log,frame_idx,fps,"traffic_sign",d,{"environment":env})
                     counts["traffic_sign"]+=1
 
-                # 2) Helmet compliance. No parent boxes; no evidence => no guess.
+                # 2) Helmet compliance. Render only stable consensus that agrees
+                # with explicit current evidence; disagreement/absence is skipped.
                 if do_detect and self.cfg.detect_helmet:
                     for r in riders:
                         instant = r.helmet.label if r.helmet is not None else "UNKNOWN"
                         stable = self.helmet_vote.update(r.track_id, instant)
-                        if r.helmet is None:
+                        if r.helmet is None or stable == "UNKNOWN" or instant != stable:
                             continue
-                        shown = stable if stable != "UNKNOWN" else instant
-                        color = (0,180,0) if shown=="HELMET" else (0,0,255)
-                        txt = shown + (f" {r.helmet.confidence:.2f}" if self.cfg.show_confidence else "")
+                        color = (0,180,0) if stable=="HELMET" else (0,0,255)
+                        txt = stable + (f" {r.helmet.confidence:.2f}" if self.cfg.show_confidence else "")
                         draw_label(frame,r.helmet.box,txt,color,2)
                         self._log(log,frame_idx,fps,"rider_helmet",r.helmet,{"stable":stable,"rider_track_id":r.track_id,"motorcycle_track_id":r.motorcycle.track_id,"environment":env})
-                        counts["helmet" if shown=="HELMET" else "no_helmet"]+=1
+                        counts["helmet" if stable=="HELMET" else "no_helmet"]+=1
 
                 # 3) Car license plates + validated OCR.
                 if do_detect and self.cfg.detect_plates:
