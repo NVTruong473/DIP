@@ -36,10 +36,17 @@ class VideoProcessor:
         self.scene = SceneDetector(m, cfg.scene_conf, cfg.scene_imgsz, cfg.scene_classes) if (cfg.detect_helmet or cfg.detect_plates) else None
         self.helmet = HelmetDetector(m, cfg.helmet_conf, cfg.helmet_imgsz) if cfg.detect_helmet else None
         self.plate = LicensePlateDetector(m, cfg.plate_conf, cfg.plate_imgsz) if cfg.detect_plates else None
-        self.ocr = PlateOCR(gpu=torch.cuda.is_available(), min_conf=cfg.ocr_min_conf, min_votes=cfg.ocr_min_votes) if cfg.detect_plates else None
+        self.ocr = PlateOCR(
+            gpu=torch.cuda.is_available(),
+            min_conf=cfg.ocr_min_conf,
+            min_votes=cfg.ocr_min_votes,
+            model_dir=str(Path(cfg.models_dir)/"easyocr"),
+        ) if cfg.detect_plates else None
 
-        self.sign_smooth = CurrentOnlySmoother(cfg.sign_track_iou, confirm_hits=cfg.sign_confirm_hits, class_aware=True)
-        self.plate_smooth = CurrentOnlySmoother(cfg.plate_track_iou, confirm_hits=cfg.plate_confirm_hits, class_aware=False)
+        # Current-detection-only smoothing: no stale/predicted boxes are rendered.
+        self.sign_smooth = CurrentOnlySmoother(cfg.sign_track_iou, alpha=0.68, confirm_hits=cfg.sign_confirm_hits, class_aware=True)
+        self.helmet_smooth = CurrentOnlySmoother(0.22, alpha=0.72, confirm_hits=1, class_aware=True)
+        self.plate_smooth = CurrentOnlySmoother(cfg.plate_track_iou, alpha=0.72, confirm_hits=cfg.plate_confirm_hits, class_aware=False)
         self.helmet_vote = HelmetVoter(cfg.helmet_vote_window, cfg.helmet_min_votes, cfg.helmet_stable_ratio)
 
     @staticmethod
@@ -82,10 +89,10 @@ class VideoProcessor:
         cap = cv2.VideoCapture(input_path)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {input_path}")
+
         fps = float(cap.get(cv2.CAP_PROP_FPS)) or 30.0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         width,height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
         stem = Path(input_path).stem
         out_dir = Path(self.cfg.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
         final = Path(output_path) if output_path else out_dir/f"{stem}_result.mp4"
@@ -94,6 +101,7 @@ class VideoProcessor:
         crops_dir = out_dir/f"{stem}_plates"; crops_dir.mkdir(parents=True, exist_ok=True)
         writer = cv2.VideoWriter(str(temp), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width,height))
         if not writer.isOpened():
+            cap.release()
             raise RuntimeError("Cannot create output writer")
 
         counts = {"traffic_sign":0,"helmet":0,"no_helmet":0,"car_plate":0,"ocr":0}
@@ -106,45 +114,51 @@ class VideoProcessor:
             frame_idx = 0
             while True:
                 ok, frame = cap.read()
-                if not ok: break
+                if not ok:
+                    break
                 raw = frame.copy()
                 infer, env = adapt_for_inference(frame, self.cfg.night_v_threshold, self.cfg.glare_v_threshold) if self.cfg.adaptive_lighting else (frame,"DAY")
                 env_counts[env] = env_counts.get(env,0)+1
                 do_detect = frame_idx % max(1,self.cfg.frame_stride)==0
 
-                signs=[]; scene=[]; helmets=[]; plate_pairs=[]
+                signs=[]; scene=[]; helmets=[]; plate_pairs=[]; riders=[]
                 if do_detect:
-                    if self.sign: signs = self.sign_smooth.update(self.sign.detect(infer))
-                    if self.scene: scene = self.scene.detect(infer)
-                    if self.helmet: helmets = self.helmet.detect(infer)
+                    if self.sign:
+                        signs = self.sign_smooth.update(self.sign.detect(infer))
+                    if self.scene:
+                        scene = self.scene.detect(infer)
+                    if self.helmet:
+                        helmets = self.helmet_smooth.update(self.helmet.detect(infer))
+                        riders = associate_riders(scene, helmets)
                     if self.plate:
                         candidates = self.plate.detect(infer)
                         plate_pairs = associate_car_plates(scene, candidates)
-                        plates = self.plate_smooth.update([p.plate for p in plate_pairs])
-                        allowed_ids = {id(p) for p in plates}
+                        current_plates = self.plate_smooth.update([p.plate for p in plate_pairs])
+                        allowed_ids = {id(p) for p in current_plates}
                         plate_pairs = [p for p in plate_pairs if id(p.plate) in allowed_ids]
 
-                # 1) Traffic signs: actual current detections only, EMA-smoothed.
+                # 1) Traffic signs.
                 for d in signs:
                     txt = f"{d.label} {d.confidence:.2f}" if self.cfg.show_confidence else d.label
                     draw_label(frame,d.box,txt,(0,165,255),2)
-                    self._log(log,frame_idx,fps,"traffic_sign",d,{"environment":env}); counts["traffic_sign"]+=1
+                    self._log(log,frame_idx,fps,"traffic_sign",d,{"environment":env})
+                    counts["traffic_sign"]+=1
 
-                # 2) Helmet compliance. Parent person/motorcycle boxes stay hidden.
+                # 2) Helmet compliance. No parent boxes; no evidence => no guess.
                 if do_detect and self.cfg.detect_helmet:
-                    for r in associate_riders(scene, helmets):
+                    for r in riders:
                         instant = r.helmet.label if r.helmet is not None else "UNKNOWN"
                         stable = self.helmet_vote.update(r.track_id, instant)
                         if r.helmet is None:
-                            continue  # no explicit evidence => no guessed box/status
+                            continue
                         shown = stable if stable != "UNKNOWN" else instant
                         color = (0,180,0) if shown=="HELMET" else (0,0,255)
                         txt = shown + (f" {r.helmet.confidence:.2f}" if self.cfg.show_confidence else "")
                         draw_label(frame,r.helmet.box,txt,color,2)
-                        self._log(log,frame_idx,fps,"rider_helmet",r.helmet,{"stable":stable,"motorcycle_track_id":r.track_id,"environment":env})
+                        self._log(log,frame_idx,fps,"rider_helmet",r.helmet,{"stable":stable,"rider_track_id":r.track_id,"motorcycle_track_id":r.motorcycle.track_id,"environment":env})
                         counts["helmet" if shown=="HELMET" else "no_helmet"]+=1
 
-                # 3) Car plates + OCR. Vehicle boxes remain hidden.
+                # 3) Car license plates + validated OCR.
                 if do_detect and self.cfg.detect_plates:
                     for pair in plate_pairs:
                         d = pair.plate
@@ -152,16 +166,24 @@ class VideoProcessor:
                         q = crop_quality(crop)
                         text = self.ocr.stable(pair.track_id)
                         h,w = crop.shape[:2] if crop.size else (0,0)
-                        quality_ok = (w>=self.cfg.plate_min_width_px and h>=self.cfg.plate_min_height_px and q["sharpness"]>=self.cfg.plate_min_sharpness and 20<=q["brightness"]<=240)
+                        quality_ok = (
+                            w>=self.cfg.plate_min_width_px and
+                            h>=self.cfg.plate_min_height_px and
+                            q["sharpness"]>=self.cfg.plate_min_sharpness and
+                            20<=q["brightness"]<=240
+                        )
                         if quality_ok and frame_idx % max(1,self.cfg.ocr_every_n_frames)==0:
                             candidate, oconf = self.ocr.recognize(crop)
                             text = self.ocr.update(pair.track_id,candidate,oconf)
-                            if candidate: counts["ocr"]+=1
+                            if candidate:
+                                counts["ocr"]+=1
                         label = f"PLATE {text}" if text else "PLATE"
-                        if self.cfg.show_confidence and not text: label += f" {d.confidence:.2f}"
+                        if self.cfg.show_confidence and not text:
+                            label += f" {d.confidence:.2f}"
                         draw_label(frame,d.box,label,(255,180,0),2)
                         self._log(log,frame_idx,fps,"car_license_plate",d,{"ocr":text,"quality":q,"environment":env})
                         counts["car_plate"]+=1
+
                         key = str(pair.track_id) if pair.track_id is not None else f"f{frame_idx}_{d.box[0]}"
                         score = d.confidence + min(q["sharpness"],200)/1000.0
                         if quality_ok and score > best_crop.get(key,-1):
@@ -172,11 +194,19 @@ class VideoProcessor:
                             best_crop[key]=score
 
                 if self.cfg.show_hud:
-                    cv2.putText(frame,f"{env} | signs {len(signs)} | riders {len(associate_riders(scene,helmets)) if self.cfg.detect_helmet else 0} | plates {len(plate_pairs)}",(18,32),cv2.FONT_HERSHEY_SIMPLEX,0.62,(255,255,255),2,cv2.LINE_AA)
+                    cv2.putText(frame,f"{env} | signs {len(signs)} | riders {len(riders)} | plates {len(plate_pairs)}",(18,32),cv2.FONT_HERSHEY_SIMPLEX,0.62,(255,255,255),2,cv2.LINE_AA)
 
-                writer.write(frame); frame_idx+=1; bar.update(1)
-                if progress_callback and (frame_idx%15==0 or frame_idx==total): progress_callback(frame_idx,total)
+                writer.write(frame)
+                frame_idx+=1
+                bar.update(1)
+                if progress_callback and (frame_idx%15==0 or frame_idx==total):
+                    progress_callback(frame_idx,total)
             bar.close()
 
         cap.release(); writer.release(); self._mux_h264(str(temp),str(input_path),str(final))
-        return {"input":str(input_path),"output_video":str(final),"csv":str(csv_path),"plate_crops_dir":str(crops_dir),"frames":frame_idx,"fps":fps,"duration_sec":frame_idx/fps if fps else 0,"counts":counts,"lighting_frames":env_counts}
+        return {
+            "input":str(input_path),"output_video":str(final),"csv":str(csv_path),
+            "plate_crops_dir":str(crops_dir),"frames":frame_idx,"fps":fps,
+            "duration_sec":frame_idx/fps if fps else 0,"counts":counts,
+            "lighting_frames":env_counts,
+        }
