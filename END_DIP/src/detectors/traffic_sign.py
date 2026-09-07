@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-import unicodedata
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import torch
 from ultralytics import YOLO
 
@@ -11,12 +10,6 @@ from src.common import Detection
 from src.model_manager import ModelManager
 from src.utils.dip import analyze_sign_color, enhance_frame_clahe
 from src.utils.geometry import box_iou
-
-
-def ascii_text(value: str) -> str:
-    # cv2.putText uses Hershey fonts and cannot render Vietnamese Unicode.
-    value = unicodedata.normalize("NFKD", value)
-    return "".join(ch for ch in value if not unicodedata.combining(ch)).encode("ascii", "ignore").decode("ascii")
 
 
 class TrafficSignDetector:
@@ -52,7 +45,13 @@ class TrafficSignDetector:
             if isinstance(value, str):
                 out[str(key)] = value
             elif isinstance(value, dict):
-                text = value.get("vi") or value.get("vn") or value.get("name_vi") or value.get("description") or value.get("name")
+                text = (
+                    value.get("vi")
+                    or value.get("vn")
+                    or value.get("name_vi")
+                    or value.get("description")
+                    or value.get("name")
+                )
                 out[str(key)] = str(text) if text else str(key)
             else:
                 out[str(key)] = str(value)
@@ -82,7 +81,11 @@ class TrafficSignDetector:
             conf = float(box.conf[0])
             raw = str(names.get(cls, cls) if isinstance(names, dict) else names[cls])
             desc_vi = self.mapping.get(raw, raw)
-            friendly = f"{raw}: {ascii_text(desc_vi)}" if desc_vi != raw else raw
+
+            # Keep the original UTF-8 Vietnamese label. Rendering is handled
+            # with Pillow/TrueType in visualization.py instead of cv2.putText.
+            friendly = f"{raw}: {desc_vi}" if desc_vi != raw else raw
+
             roi = original_frame[y1:y2, x1:x2]
             dip = analyze_sign_color(roi)
             dip["description_vi"] = desc_vi
@@ -113,7 +116,7 @@ class TrafficSignDetector:
         return out
 
     def detect(self, frame) -> List[Detection]:
-        h, w = frame.shape[:2]
+        _, w = frame.shape[:2]
         if not self.tiled or w < 1000:
             return self._predict_tile(frame, 0, 0, frame)
 
