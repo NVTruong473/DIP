@@ -32,7 +32,7 @@ def main():
     print("Base plate model:", base_model)
 
     model = YOLO(base_model)
-    result = model.train(
+    model.train(
         data=args.data,
         epochs=args.epochs,
         imgsz=args.imgsz,
@@ -48,7 +48,7 @@ def main():
         verbose=True,
     )
 
-    save_dir = Path(result.save_dir)
+    save_dir = Path(model.trainer.save_dir)
     best = save_dir / "weights" / "best.pt"
     if not best.exists():
         raise FileNotFoundError(f"Training finished but best.pt was not found at {best}")
