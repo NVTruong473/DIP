@@ -5,7 +5,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from src.config import AppConfig, DEFAULT_RIGHT_ROAD_ROI, parse_roi_json
+from src.config import AppConfig
 from src.video_processor import VideoProcessor
 
 
@@ -14,7 +14,17 @@ def drive_root() -> Path:
     return p if p.exists() else Path.cwd()
 
 
-def process_video(video_path, detect_signs, detect_helmet, show_roi, sign_conf, helmet_conf, scene_conf, roi_json, speed_mode, progress=gr.Progress()):
+def process_video(
+    video_path,
+    detect_signs,
+    detect_plates,
+    sign_conf,
+    plate_conf,
+    vehicle_conf,
+    speed_mode,
+    show_hud,
+    progress=gr.Progress(),
+):
     if not video_path:
         raise gr.Error("Please upload/select a video first.")
 
@@ -24,27 +34,20 @@ def process_video(video_path, detect_signs, detect_helmet, show_roi, sign_conf, 
     out_dir.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        roi = parse_roi_json(roi_json)
-    except Exception as exc:
-        raise gr.Error(f"Invalid ROI JSON: {exc}")
-
-    stride = 2 if speed_mode else 1
     cfg = AppConfig(
         input_video=str(video_path),
         output_dir=str(out_dir),
         models_dir=str(models_dir),
         sign_conf=float(sign_conf),
-        helmet_conf=float(helmet_conf),
-        scene_conf=float(scene_conf),
+        plate_conf=float(plate_conf),
+        vehicle_conf=float(vehicle_conf),
         detect_signs=bool(detect_signs),
-        detect_helmet=bool(detect_helmet),
-        show_roi=bool(show_roi),
-        right_road_roi=roi,
-        frame_stride=stride,
+        detect_plates=bool(detect_plates),
+        show_hud=bool(show_hud),
+        frame_stride=2 if speed_mode else 1,
     )
 
-    progress(0.01, desc="Loading YOLO models...")
+    progress(0.01, desc="Loading models...")
     processor = VideoProcessor(cfg)
 
     def cb(i, total):
@@ -57,12 +60,13 @@ def process_video(video_path, detect_signs, detect_helmet, show_roi, sign_conf, 
     return summary["output_video"], summary["csv"], report
 
 
-with gr.Blocks(title="Traffic Safety Monitoring - DIP + YOLO") as demo:
+with gr.Blocks(title="Traffic Sign + Car License Plate Detection") as demo:
     gr.Markdown("""
-# Traffic Safety Monitoring — DIP + YOLO
-**Traffic signs:** Vietnamese 56-class YOLO detector + DIP color cue  
-**Helmet:** only riders associated with motorcycles/bicycles inside the right-road ROI  
-**Important:** a missed helmet detection is `UNKNOWN`, never automatically a violation.
+# Traffic Sign + Car License Plate Detection
+
+- **Biển báo:** YOLO nhận diện biển báo giao thông Việt Nam + DIP color cue.
+- **Biển số ô tô:** YOLO phát hiện biển số; YOLO11 + ByteTrack chỉ dùng ẩn để xác nhận biển số thuộc `car / bus / truck`.
+- **Video sạch:** không vẽ box xe, không ROI, không helmet, không Student ID.
     """)
 
     with gr.Row():
@@ -71,23 +75,31 @@ with gr.Blocks(title="Traffic Safety Monitoring - DIP + YOLO") as demo:
 
     with gr.Row():
         detect_signs = gr.Checkbox(True, label="Detect Vietnamese traffic signs")
-        detect_helmet = gr.Checkbox(True, label="Detect helmet compliance")
-        show_roi = gr.Checkbox(True, label="Show right-road ROI")
+        detect_plates = gr.Checkbox(True, label="Detect car license plates")
         speed_mode = gr.Checkbox(False, label="Fast demo (infer every 2nd frame)")
+        show_hud = gr.Checkbox(False, label="Show small HUD")
 
     with gr.Row():
         sign_conf = gr.Slider(0.10, 0.80, value=0.25, step=0.01, label="Traffic-sign confidence")
-        helmet_conf = gr.Slider(0.10, 0.80, value=0.35, step=0.01, label="Helmet confidence")
-        scene_conf = gr.Slider(0.10, 0.80, value=0.30, step=0.01, label="Rider/vehicle confidence")
+        plate_conf = gr.Slider(0.10, 0.80, value=0.30, step=0.01, label="License-plate confidence")
+        vehicle_conf = gr.Slider(0.10, 0.80, value=0.30, step=0.01, label="Internal vehicle confidence")
 
-    roi_json = gr.Textbox(value=json.dumps(DEFAULT_RIGHT_ROAD_ROI), label="Right-road polygon (normalized JSON)", info="Points are [x,y] in [0,1]. Change this when the camera/road geometry changes.")
     run_btn = gr.Button("Process video", variant="primary")
     csv_out = gr.File(label="Detection CSV")
     summary_out = gr.Code(label="Run summary", language="json")
 
     run_btn.click(
         fn=process_video,
-        inputs=[video_in, detect_signs, detect_helmet, show_roi, sign_conf, helmet_conf, scene_conf, roi_json, speed_mode],
+        inputs=[
+            video_in,
+            detect_signs,
+            detect_plates,
+            sign_conf,
+            plate_conf,
+            vehicle_conf,
+            speed_mode,
+            show_hud,
+        ],
         outputs=[video_out, csv_out, summary_out],
     )
 
