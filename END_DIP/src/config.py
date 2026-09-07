@@ -83,8 +83,6 @@ class AppConfig:
     # Process every frame by default. Set to 2 for a faster demo if needed.
     frame_stride: int = 1
 
-    student_id: str = "521H0324_521H0461"
-
     def ensure_dirs(self) -> None:
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
         Path(self.models_dir).mkdir(parents=True, exist_ok=True)
