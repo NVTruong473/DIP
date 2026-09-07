@@ -6,20 +6,19 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional
 
 import cv2
 from tqdm.auto import tqdm
 
 from src.config import AppConfig
-from src.detectors.helmet import HelmetDetector
+from src.detectors.license_plate import LicensePlateDetector
 from src.detectors.scene import SceneDetector
 from src.detectors.traffic_sign import TrafficSignDetector
 from src.model_manager import ModelManager
-from src.rider_logic import associate_riders
-from src.temporal import HelmetTemporalVoter, SignTemporalHold
-from src.utils.geometry import filter_detections_in_roi, normalized_polygon_to_pixels
-from src.utils.visualization import draw_label, draw_roi, status_color
+from src.plate_logic import associate_car_plates
+from src.temporal import DetectionTemporalHold
+from src.utils.visualization import draw_label
 
 
 CSV_FIELDS = ["frame", "time_sec", "type", "track_id", "class", "confidence", "x1", "y1", "x2", "y2", "extra"]
@@ -38,40 +37,35 @@ class VideoProcessor:
                 imgsz=config.sign_imgsz,
                 use_dip_enhancement=config.use_dip_enhancement,
                 tiled=config.sign_tiled,
-            ) if config.detect_signs else None
-        )
-        self.scene_detector = (
-            SceneDetector(self.manager, conf=config.scene_conf, imgsz=config.scene_imgsz, classes=config.scene_classes)
-            if config.detect_helmet else None
-        )
-        self.helmet_detector = (
-            HelmetDetector(self.manager, conf=config.helmet_conf, imgsz=config.helmet_imgsz)
-            if config.detect_helmet else None
+            )
+            if config.detect_signs
+            else None
         )
 
-        self.voter = HelmetTemporalVoter(
-            window=config.vote_window,
-            min_votes=config.min_votes,
-            stable_ratio=config.stable_ratio,
-            ttl_frames=config.state_ttl_frames,
+        # Vehicle boxes are internal only. They filter out motorcycle plates and
+        # provide stable ByteTrack IDs, but are never drawn on the output video.
+        self.vehicle_detector = (
+            SceneDetector(
+                self.manager,
+                conf=config.vehicle_conf,
+                imgsz=config.vehicle_imgsz,
+                classes=config.vehicle_classes,
+            )
+            if config.detect_plates
+            else None
         )
-        self.sign_hold = SignTemporalHold(config.sign_hold_frames, config.sign_iou_match)
+        self.plate_detector = (
+            LicensePlateDetector(self.manager, conf=config.plate_conf, imgsz=config.plate_imgsz)
+            if config.detect_plates
+            else None
+        )
 
-    @staticmethod
-    def _crop_from_polygon(poly, width: int, height: int) -> Tuple[int, int, int, int]:
-        x, y, w, h = cv2.boundingRect(poly)
-        pad_x = int(0.03 * width)
-        pad_y = int(0.03 * height)
-        return max(0, x - pad_x), max(0, y - pad_y), min(width, x + w + pad_x), min(height, y + h + pad_y)
+        self.sign_hold = DetectionTemporalHold(config.sign_hold_frames, config.sign_iou_match, class_aware=True)
+        self.plate_hold = DetectionTemporalHold(config.plate_hold_frames, config.plate_iou_match, class_aware=False)
 
     @staticmethod
     def _mux_h264(temp_video: str, source_video: str, final_video: str) -> None:
-        """Encode a browser/Colab-friendly MP4.
-
-        OpenCV's temporary `mp4v` output is not reliably playable in Chrome.
-        Force H.264 + yuv420p + avc1 and move the moov atom to the front so the
-        final Drive file can be streamed by HTML5/Colab without downloading it.
-        """
+        """Encode a Chrome/Colab-friendly H.264 MP4 with optional source audio."""
         common_video = [
             "-c:v", "libx264",
             "-preset", "veryfast",
@@ -118,10 +112,29 @@ class VideoProcessor:
             return
         except Exception as second_error:
             print(f"[WARN] H.264 browser encoding failed: {second_error}")
-            print("[WARN] Falling back to OpenCV mp4v output; browser playback may be unavailable.")
+            print("[WARN] Falling back to OpenCV mp4v output; inline browser playback may be unavailable.")
             shutil.move(temp_video, final_video)
 
-    def process(self, input_path: str, output_path: Optional[str] = None, progress_callback: Optional[Callable[[int, int], None]] = None) -> Dict:
+    @staticmethod
+    def _safe_crop(frame, box, pad: float = 0.08):
+        x1, y1, x2, y2 = [int(v) for v in box]
+        h, w = frame.shape[:2]
+        bw = max(1, x2 - x1)
+        bh = max(1, y2 - y1)
+        px = int(round(bw * pad))
+        py = int(round(bh * pad))
+        x1 = max(0, x1 - px)
+        y1 = max(0, y1 - py)
+        x2 = min(w, x2 + px)
+        y2 = min(h, y2 + py)
+        return frame[y1:y2, x1:x2]
+
+    def process(
+        self,
+        input_path: str,
+        output_path: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Dict:
         input_path = str(input_path)
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"Input video not found: {input_path}")
@@ -138,8 +151,9 @@ class VideoProcessor:
         stem = Path(input_path).stem
         out_dir = Path(self.cfg.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        snapshots_dir = out_dir / f"{stem}_violations"
-        snapshots_dir.mkdir(parents=True, exist_ok=True)
+        plate_crops_dir = out_dir / f"{stem}_plates"
+        if self.cfg.save_plate_crops and self.cfg.detect_plates:
+            plate_crops_dir.mkdir(parents=True, exist_ok=True)
 
         final_video = Path(output_path) if output_path else out_dir / f"{stem}_result.mp4"
         final_video.parent.mkdir(parents=True, exist_ok=True)
@@ -151,17 +165,13 @@ class VideoProcessor:
             cap.release()
             raise RuntimeError("Cannot create output video writer.")
 
-        polygon_px = normalized_polygon_to_pixels(self.cfg.right_road_roi, width, height)
-        crop_box = self._crop_from_polygon(polygon_px, width, height)
-
         last_signs = []
-        last_scene = []
-        last_helmets = []
-        last_snapshot_time: Dict[int, float] = {}
-        snapshot_count = 0
-        nohelmet_tracks = set()
-        sign_events = 0
-        rider_observations = 0
+        last_plates = []
+        sign_rows = 0
+        plate_rows = 0
+        saved_plate_crops = 0
+        vehicle_tracks_with_plate = set()
+        best_crop_conf: Dict[str, float] = {}
 
         with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
             log = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
@@ -174,60 +184,76 @@ class VideoProcessor:
                 if not ok:
                     break
 
+                raw_frame = frame.copy() if self.cfg.save_plate_crops and self.cfg.detect_plates else frame
                 do_detect = frame_idx % max(1, self.cfg.frame_stride) == 0
 
-                if self.sign_detector is not None and do_detect:
-                    last_signs = self.sign_hold.update(self.sign_detector.detect(frame))
-                elif self.sign_detector is not None:
-                    last_signs = self.sign_hold.update([])
+                if self.sign_detector is not None:
+                    current_signs = self.sign_detector.detect(frame) if do_detect else []
+                    last_signs = self.sign_hold.update(current_signs)
+                    if do_detect:
+                        for sign in current_signs:
+                            self._log_detection(log, frame_idx, fps, "traffic_sign", sign)
+                            sign_rows += 1
 
-                if self.scene_detector is not None and self.helmet_detector is not None and do_detect:
-                    scene = self.scene_detector.detect(frame, crop_box=crop_box)
-                    helmets = self.helmet_detector.detect(frame, crop_box=crop_box)
-                    last_scene = filter_detections_in_roi(scene, polygon_px, anchor="bottom")
-                    last_helmets = filter_detections_in_roi(helmets, polygon_px, anchor="center")
+                current_pairs = []
+                if self.vehicle_detector is not None and self.plate_detector is not None:
+                    if do_detect:
+                        vehicles = self.vehicle_detector.detect(frame)
+                        candidate_plates = self.plate_detector.detect(frame)
+                        current_pairs = associate_car_plates(vehicles, candidate_plates)
+                        current_plates = [pair.plate for pair in current_pairs]
+                    else:
+                        current_plates = []
+                    last_plates = self.plate_hold.update(current_plates)
 
-                if self.cfg.show_roi and self.cfg.detect_helmet:
-                    draw_roi(frame, polygon_px)
-
+                # Keep the output intentionally sparse: only traffic signs and
+                # actual car/bus/truck license plates are rendered.
                 for sign in last_signs:
-                    extra = sign.extra or {}
-                    color_hint = extra.get("dominant_color", "")
-                    suffix = f" [{color_hint}]" if color_hint and color_hint != "unknown" else ""
-                    draw_label(frame, sign.box, f"{sign.label} {sign.confidence:.2f}{suffix}", (255, 120, 0))
-                    if do_detect:
-                        self._log_detection(log, frame_idx, fps, "traffic_sign", sign)
-                        sign_events += 1
+                    draw_label(frame, sign.box, f"{sign.label} {sign.confidence:.2f}", (255, 120, 0))
 
-                riders = associate_riders(last_scene, last_helmets, frame.shape) if self.cfg.detect_helmet else []
-                current_violation_tracks = []
-                for rider in riders:
-                    stable = self.voter.update(rider.track_id, rider.instantaneous_status, frame_idx) if do_detect else self.voter.get(rider.track_id)
-                    rider.stable_status = stable
-                    shown = stable if stable != "UNKNOWN" else rider.instantaneous_status
-                    track_txt = f" ID:{rider.track_id}" if rider.track_id is not None else ""
-                    draw_label(frame, rider.person.box, f"RIDER{track_txt} | {shown}", status_color(shown), thickness=3 if shown == "NO_HELMET" else 2)
-                    if rider.helmet is not None:
-                        draw_label(frame, rider.helmet.box, f"{rider.helmet.label} {rider.helmet.confidence:.2f}", status_color(rider.helmet.label))
+                for plate in last_plates:
+                    draw_label(frame, plate.box, f"Biển số ô tô {plate.confidence:.2f}", (0, 190, 0))
 
-                    if do_detect:
-                        self._log_rider(log, frame_idx, fps, rider)
-                        rider_observations += 1
+                if do_detect:
+                    for pair in current_pairs:
+                        plate = pair.plate
+                        self._log_detection(log, frame_idx, fps, "car_license_plate", plate)
+                        plate_rows += 1
 
-                    if stable == "NO_HELMET" and rider.track_id is not None:
-                        nohelmet_tracks.add(rider.track_id)
-                        current_violation_tracks.append(rider.track_id)
+                        if pair.vehicle.track_id is not None:
+                            vehicle_tracks_with_plate.add(pair.vehicle.track_id)
+                            crop_key = f"track_{pair.vehicle.track_id}"
+                        else:
+                            crop_key = f"frame_{frame_idx}_{plate.box[0]}_{plate.box[1]}"
 
-                cv2.putText(frame, f"t={frame_idx / fps:6.1f}s | signs={len(last_signs)} | riders={len(riders)}", (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
+                        if self.cfg.save_plate_crops:
+                            old_conf = best_crop_conf.get(crop_key, -1.0)
+                            if plate.confidence > old_conf + 0.02:
+                                crop = self._safe_crop(raw_frame, plate.box)
+                                if crop.size and crop.shape[1] >= 18 and crop.shape[0] >= 8:
+                                    crop_path = plate_crops_dir / f"{crop_key}_conf{plate.confidence:.2f}.jpg"
+                                    # Remove older best crop(s) for this vehicle track.
+                                    if pair.vehicle.track_id is not None:
+                                        for old in plate_crops_dir.glob(f"{crop_key}_conf*.jpg"):
+                                            try:
+                                                old.unlink()
+                                            except OSError:
+                                                pass
+                                    cv2.imwrite(str(crop_path), crop)
+                                    best_crop_conf[crop_key] = plate.confidence
+                                    saved_plate_crops += 1
 
-                now_sec = frame_idx / fps
-                for track_id in current_violation_tracks:
-                    last = last_snapshot_time.get(track_id, -1e9)
-                    if now_sec - last >= self.cfg.violation_snapshot_cooldown_sec:
-                        snap = snapshots_dir / f"no_helmet_track{track_id}_t{now_sec:07.2f}.jpg"
-                        cv2.imwrite(str(snap), frame)
-                        last_snapshot_time[track_id] = now_sec
-                        snapshot_count += 1
+                if self.cfg.show_hud:
+                    cv2.putText(
+                        frame,
+                        f"t={frame_idx / fps:6.1f}s | signs={len(last_signs)} | car plates={len(last_plates)}",
+                        (18, 34),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.62,
+                        (255, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
 
                 writer.write(frame)
                 frame_idx += 1
@@ -245,15 +271,14 @@ class VideoProcessor:
             "input": input_path,
             "output_video": str(final_video),
             "csv": str(csv_path),
-            "snapshots_dir": str(snapshots_dir),
+            "plate_crops_dir": str(plate_crops_dir) if self.cfg.save_plate_crops and self.cfg.detect_plates else None,
             "frames": frame_idx,
             "fps": fps,
             "duration_sec": frame_idx / fps if fps else 0,
-            "sign_detection_rows": sign_events,
-            "rider_observation_rows": rider_observations,
-            "unique_no_helmet_tracks": len(nohelmet_tracks),
-            "violation_snapshots": snapshot_count,
-            "roi": self.cfg.right_road_roi,
+            "traffic_sign_rows": sign_rows,
+            "car_license_plate_rows": plate_rows,
+            "unique_vehicle_tracks_with_plate": len(vehicle_tracks_with_plate),
+            "saved_plate_crop_updates": saved_plate_crops,
         }
 
     @staticmethod
@@ -266,25 +291,9 @@ class VideoProcessor:
             "track_id": det.track_id if det.track_id is not None else "",
             "class": det.label,
             "confidence": round(det.confidence, 4),
-            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
             "extra": json.dumps(det.extra or {}, ensure_ascii=False),
-        })
-
-    @staticmethod
-    def _log_rider(log, frame_idx: int, fps: float, rider) -> None:
-        x1, y1, x2, y2 = rider.person.box
-        hconf = rider.helmet.confidence if rider.helmet is not None else 0.0
-        log.writerow({
-            "frame": frame_idx,
-            "time_sec": round(frame_idx / fps, 3),
-            "type": "rider_helmet_status",
-            "track_id": rider.track_id if rider.track_id is not None else "",
-            "class": rider.stable_status,
-            "confidence": round(hconf, 4),
-            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-            "extra": json.dumps({
-                "instantaneous": rider.instantaneous_status,
-                "helmet_raw": rider.helmet.raw_label if rider.helmet else None,
-                "vehicle_track_id": rider.vehicle.track_id,
-            }, ensure_ascii=False),
         })
