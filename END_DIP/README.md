@@ -1,5 +1,7 @@
 # Traffic Sign Recognition + Car License Plate Detection — DIP + YOLO
 
+> **Google Colab final run:** open `END_DIP/colab_demo.ipynb` on branch `feature/yolo-traffic-safety` and run every cell from top to bottom. The notebook now clears stale outputs, runs the final traffic-sign + car-plate pipeline, validates the Drive result, and shows a lightweight inline preview.
+
 Redesign of the original `END_DIP/521H0324_521H0461.py` project for real road video and Google Colab.
 
 The original baseline uses HSV thresholding -> contours -> template matching. It is kept in the repository for the Digital Image Processing comparison/report, while the new pipeline uses learned detectors as the primary perception stack and keeps classic DIP as an interpretable secondary cue for traffic signs.
@@ -85,64 +87,39 @@ MyDrive/
 └── DIP/
     ├── video1.mp4
     ├── models/
-    │   └── plate_best.pt            # optional Vietnamese fine-tuned checkpoint
     ├── datasets/
-    │   └── vn_car_plate/
     ├── training_runs/
     └── outputs/
         ├── video1_result.mp4
         ├── video1_result.csv
         └── video1_plates/
-            └── track_*_conf*.jpg
 ```
 
-All important artifacts remain on Drive after a Colab runtime reset.
+## Recommended final workflow
 
-## Google Colab — normal inference
+Use `END_DIP/colab_demo.ipynb` rather than manually copying commands. The notebook performs these steps:
 
-The easiest option is `colab_demo.ipynb`.
+1. Mount Google Drive.
+2. Fresh-clone `feature/yolo-traffic-safety`.
+3. Install dependencies.
+4. Verify T4 GPU and `MyDrive/DIP/video1.mp4`.
+5. Download/cache the three required models.
+6. Delete stale previous outputs and run `main.py`.
+7. Validate that the result and CSV were written to Drive.
+8. Create an H.264 preview under `/content` and show it directly below the Colab cell.
 
-### 1. Enable GPU
-
-Use **Runtime -> Change runtime type -> T4 GPU** or better.
-
-### 2. Mount Drive
-
-```python
-from google.colab import drive
-drive.mount('/content/drive')
-```
-
-Place the input at:
+Persistent result:
 
 ```text
-/content/drive/MyDrive/DIP/video1.mp4
+/content/drive/MyDrive/DIP/outputs/video1_result.mp4
 ```
 
-### 3. Clone the development branch
+The final MP4 is re-encoded as H.264 / yuv420p / avc1 with fast-start metadata so it is suitable for Google Drive and browser playback.
+
+## CLI equivalent
 
 ```bash
-!rm -rf /content/DIP
-!git clone -b feature/yolo-traffic-safety https://github.com/NVTruong473/DIP.git /content/DIP
-%cd /content/DIP/END_DIP
-```
-
-### 4. Install
-
-```bash
-!pip install -q -r requirements.txt
-```
-
-### 5. Download models once
-
-```bash
-!python download_models.py --models-dir '/content/drive/MyDrive/DIP/models'
-```
-
-### 6. Process video
-
-```bash
-!python main.py \
+python main.py \
   --input '/content/drive/MyDrive/DIP/video1.mp4' \
   --output-dir '/content/drive/MyDrive/DIP/outputs' \
   --models-dir '/content/drive/MyDrive/DIP/models' \
@@ -151,120 +128,31 @@ Place the input at:
   --vehicle-conf 0.30
 ```
 
-Results:
-
-```text
-/content/drive/MyDrive/DIP/outputs/video1_result.mp4
-/content/drive/MyDrive/DIP/outputs/video1_result.csv
-/content/drive/MyDrive/DIP/outputs/video1_plates/
-```
-
-The output MP4 is re-encoded to H.264/yuv420p/avc1 with `faststart` for Chrome and Google Colab playback.
-
-## Visually clean defaults
-
-By default the output does **not** show:
-
-- Student ID
-- road ROI
-- car/bus/truck boxes
-- frame statistics/HUD
-- motorcycle/person/helmet boxes
-
-Only traffic signs and verified car license plates are drawn.
-
-If you want the small diagnostic HUD:
-
-```bash
-!python main.py ... --show-hud
-```
-
 ## Gradio UI
 
+`app.py` remains available for testing replacement videos. It is optional for the default final run.
+
 ```bash
-!python app.py
+python app.py
 ```
 
-The UI lets you:
+## Output CSV
 
-- upload a replacement video
-- enable/disable traffic-sign detection
-- enable/disable car-license-plate detection
-- tune traffic-sign confidence
-- tune plate confidence
-- tune internal vehicle confidence
-- run a faster every-second-frame demo
-- optionally show a small HUD
-- preview the processed video
-- download the CSV
-
-## CSV output
+Columns:
 
 ```text
 frame,time_sec,type,track_id,class,confidence,x1,y1,x2,y2,extra
 ```
 
-Types include:
+## Optional Vietnamese plate fine-tuning
 
-```text
-traffic_sign
-car_license_plate
-```
-
-For a plate row, `extra` also records the associated vehicle class and vehicle track ID.
-
-## Optional Vietnamese car-plate fine-tuning
-
-Normal inference works immediately with the pretrained plate checkpoint. Fine-tuning is optional.
-
-The provided preparation script defaults to the public Roboflow dataset:
-
-```text
-Workspace: phms-workspace-ialpp
-Project:   vietnamese-car-license-plate-dwwrm
-Version:   2
-```
-
-### Prepare dataset
-
-```python
-import os
-os.environ['ROBOFLOW_API_KEY'] = 'YOUR_KEY'
-```
-
-```bash
-!python training/prepare_plate_dataset.py \
-  --target '/content/drive/MyDrive/DIP/datasets/vn_car_plate'
-```
-
-Use the `data.yaml` path printed by the script.
-
-### Fine-tune
-
-```bash
-!python training/train_plate.py \
-  --data '/content/drive/MyDrive/DIP/datasets/vn_car_plate/data.yaml' \
-  --models-dir '/content/drive/MyDrive/DIP/models' \
-  --runs-dir '/content/drive/MyDrive/DIP/training_runs' \
-  --epochs 20 \
-  --batch 16
-```
-
-The best checkpoint is copied to:
+Normal inference works with the default pretrained detector. Optional scripts remain under `training/` to download a Vietnamese car-plate dataset, fine-tune the detector, and evaluate it. A successful fine-tune is copied to:
 
 ```text
 /content/drive/MyDrive/DIP/models/plate_best.pt
 ```
 
-The next inference run automatically uses it.
-
-### Evaluate
-
-```bash
-!python training/evaluate_plate.py \
-  --model '/content/drive/MyDrive/DIP/models/plate_best.pt' \
-  --data '/content/drive/MyDrive/DIP/datasets/vn_car_plate/data.yaml'
-```
+The main pipeline automatically prefers that file on later runs.
 
 ## Source tree
 
@@ -296,4 +184,4 @@ END_DIP/
     └── evaluate_plate.py
 ```
 
-The old template-matching script and `sign_templates/` remain only as the classic-DIP baseline for comparison in the final report.
+The original template-matching code and `sign_templates/` remain only as the classic-DIP baseline for comparison in the report/demo.
