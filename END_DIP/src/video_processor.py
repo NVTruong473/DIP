@@ -66,21 +66,59 @@ class VideoProcessor:
 
     @staticmethod
     def _mux_h264(temp_video: str, source_video: str, final_video: str) -> None:
-        cmd = [
+        """Encode a browser/Colab-friendly MP4.
+
+        OpenCV's temporary `mp4v` output is not reliably playable in Chrome.
+        Force H.264 + yuv420p + avc1 and move the moov atom to the front so the
+        final Drive file can be streamed by HTML5/Colab without downloading it.
+        """
+        common_video = [
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "22",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "high",
+            "-level", "4.1",
+            "-tag:v", "avc1",
+            "-movflags", "+faststart",
+        ]
+
+        with_audio = [
             "ffmpeg", "-y", "-loglevel", "error",
             "-i", temp_video,
             "-i", source_video,
             "-map", "0:v:0",
             "-map", "1:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-            "-c:a", "aac", "-shortest",
-            "-movflags", "+faststart",
+            *common_video,
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-shortest",
             final_video,
         ]
+
+        video_only = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", temp_video,
+            "-map", "0:v:0",
+            *common_video,
+            "-an",
+            final_video,
+        ]
+
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(with_audio, check=True)
             os.remove(temp_video)
-        except Exception:
+            return
+        except Exception as first_error:
+            print(f"[WARN] H.264 mux with source audio failed: {first_error}")
+
+        try:
+            subprocess.run(video_only, check=True)
+            os.remove(temp_video)
+            return
+        except Exception as second_error:
+            print(f"[WARN] H.264 browser encoding failed: {second_error}")
+            print("[WARN] Falling back to OpenCV mp4v output; browser playback may be unavailable.")
             shutil.move(temp_video, final_video)
 
     def process(self, input_path: str, output_path: Optional[str] = None, progress_callback: Optional[Callable[[int, int], None]] = None) -> Dict:
