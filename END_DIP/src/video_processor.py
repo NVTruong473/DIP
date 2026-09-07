@@ -218,8 +218,7 @@ class VideoProcessor:
                         nohelmet_tracks.add(rider.track_id)
                         current_violation_tracks.append(rider.track_id)
 
-                cv2.putText(frame, f"Student ID: {self.cfg.student_id}", (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.putText(frame, f"t={frame_idx / fps:6.1f}s | signs={len(last_signs)} | riders={len(riders)}", (18, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(frame, f"t={frame_idx / fps:6.1f}s | signs={len(last_signs)} | riders={len(riders)}", (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
 
                 now_sec = frame_idx / fps
                 for track_id in current_violation_tracks:
