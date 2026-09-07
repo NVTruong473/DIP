@@ -1,1 +1,1 @@
-Link Output: https://drive.google.com/drive/folders/16Wnd_wkvP9iwRwI3QIJQX-CRt_5XwLNy?usp=sharing
+Current implementation and Colab instructions: see README.md and colab_demo.ipynb on feature/yolo-traffic-safety.
