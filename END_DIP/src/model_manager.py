@@ -5,19 +5,42 @@ from huggingface_hub import hf_hub_download
 
 
 class ModelManager:
-    """Download/cache the single traffic-sign model used by the final project."""
+    """Download once to Google Drive and always prefer local fine-tuned weights."""
 
-    SIGN_REPO = "liamxdev/vtsr"
+    SIGN_REPO = "star092304/traffic-sign-detection-vietnam-yolo"
+    HELMET_REPO = "nnsohamnn/helmet-detection-yolo11"
+    PLATE_REPO = "Koushim/yolov8-license-plate-detection"
+    SCENE_REPO = "Ultralytics/YOLO11"
 
     def __init__(self, models_dir: str):
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
+    def _hf(self, repo_id: str, filename: str) -> str:
+        return hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(self.models_dir))
+
     def sign_model(self) -> str:
-        # FP16 TorchScript works well on Colab T4/L4/A100 and avoids
-        # hardware-specific TensorRT engine compatibility issues.
-        return hf_hub_download(
-            repo_id=self.SIGN_REPO,
-            filename="vtsr.torchscript",
-            local_dir=str(self.models_dir),
-        )
+        fine = self.models_dir / "traffic_sign_best.pt"
+        if fine.exists():
+            return str(fine)
+        return self._hf(self.SIGN_REPO, "best.pt")
+
+    def scene_model(self) -> str:
+        return self._hf(self.SCENE_REPO, "yolo11n.pt")
+
+    def helmet_model(self) -> str:
+        fine = self.models_dir / "helmet_best.pt"
+        if fine.exists():
+            return str(fine)
+        # Strong two-class motorcycle-rider checkpoint used until/if the large
+        # traffic dataset is fine-tuned in Colab.
+        return self._hf(self.HELMET_REPO, "yolov11s(80 epochs).pt")
+
+    def helmet_base_model(self) -> str:
+        return self._hf(self.HELMET_REPO, "yolov11s(80 epochs).pt")
+
+    def plate_model(self) -> str:
+        fine = self.models_dir / "plate_best.pt"
+        if fine.exists():
+            return str(fine)
+        return self._hf(self.PLATE_REPO, "best.pt")
