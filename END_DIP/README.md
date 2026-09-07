@@ -1,161 +1,149 @@
-# Traffic Sign Detection — DIP + YOLO
+# Traffic Intelligence System — DIP + YOLO + OCR
 
-Final redesign of `END_DIP` for Google Colab.
+Google Colab project integrating three tasks on the same road video:
 
-## Final scope
+1. **Vietnamese traffic-sign detection** — YOLO11s, 82 English-labeled classes.
+2. **Motorcycle helmet compliance** — tracked person/motorcycle association + explicit `HELMET / NO HELMET` detector.
+3. **Car license-plate detection + OCR** — car/bus/truck validation + YOLO plate detector + conservative EasyOCR recognition.
 
-The project now performs **traffic-sign detection only**.
+The complete frame is processed, so both traffic lanes are covered. Parent person/motorcycle/car boxes are intentionally hidden to keep the video readable.
 
-- YOLO is the primary detector for Vietnamese traffic signs.
-- Labels shown on the video are short **English** names.
-- Classic Digital Image Processing (DIP) color analysis is retained as secondary metadata for the report/CSV.
-- Overlapping tiled inference improves small/distant sign detection in 1080p road footage.
-- A short temporal hold reduces one-frame box flicker.
-- No helmet detection.
-- No rider/vehicle boxes.
-- No license-plate detection.
-- No ROI overlay.
-- No Student ID overlay.
+## Design rules that reduce false positives
 
-The original HSV/contour/template-matching script and `sign_templates/` are kept in the repository as the classic-DIP baseline for comparison.
+- A person is considered a rider only when spatially associated with a tracked motorcycle.
+- Multiple riders can be associated with one motorcycle, but one person cannot belong to two motorcycles.
+- Missing helmet evidence is `UNKNOWN`; it is never converted to `NO HELMET`.
+- Helmet status requires repeated temporal evidence before it becomes stable.
+- License plates are kept only when they are geometrically plausible inside the lower region of a tracked `car / bus / truck`.
+- Plate aspect ratio, relative size, location, sharpness, brightness and OCR confidence are checked.
+- OCR text must match Vietnamese car-plate grammar and appear repeatedly on the same vehicle track before being shown.
+- Bounding boxes are EMA-smoothed only when a real current-frame detection exists. Missing detections are not extrapolated or guessed.
+- Traffic-sign tile overlap + class-aware NMS improves distant-sign detection while removing duplicate tile boxes.
 
-## Pipeline
+## Lighting robustness
 
-```text
-video
-  ↓
-optional DIP enhancement
-  ↓
-2 overlapping image tiles
-  ↓
-Vietnamese Traffic Sign YOLO
-  ↓
-class-aware NMS
-  ↓
-temporal hold
-  ↓
-short English label + confidence
-  ↓
-H.264 MP4 + CSV
-```
+The original video is never altered for output. A photometric inference-only copy is created per frame:
 
-## Model
+- `DAY`: mild CLAHE.
+- `NIGHT`: gamma lift + stronger CLAHE.
+- `GLARE`: highlight compression + CLAHE.
 
-Traffic-sign detector: `liamxdev/vtsr`.
+Because these operations do not resize or warp the image, predicted coordinates still map directly to the original frame.
 
-The final Colab pipeline downloads only:
+## Models / data
 
-```text
-vtsr.torchscript
-```
+### Traffic signs
 
-Large model/output files are stored in Google Drive rather than committed to GitHub.
+Default model: `star092304/traffic-sign-detection-vietnam-yolo`
 
-## Google Drive layout
+- YOLO11s
+- 82 Vietnamese traffic-sign classes
+- English class names
+- trained on 10,157 images
+- reported mAP50 about 0.9806
+
+### Helmet compliance
+
+Default inference model: `nnsohamnn/helmet-detection-yolo11`.
+
+Optional one-time fine-tuning script:
 
 ```text
-MyDrive/
-└── DIP/
-    ├── video1.mp4
-    ├── models/
-    └── outputs/
-        ├── video1_result.mp4
-        └── video1_result.csv
+training/train_helmet_large.py
 ```
 
-## Recommended Google Colab workflow
+Selected dataset: `thundarstrom/traffic-helmet-violation`:
 
-Open `END_DIP/colab_demo.ipynb` from branch `feature/yolo-traffic-safety`, choose a **T4 GPU**, then use **Runtime → Run all**.
+- 42,559 traffic images
+- about 126,000 bounding boxes
+- `helmet` / `no_helmet`
+- train/val/test = 80/10/10
+- traffic/two-wheeler domain rather than construction PPE
 
-The notebook performs the complete workflow automatically:
+Fine-tuned output is copied to:
 
 ```text
-Mount Drive
-→ fresh clone
-→ install dependencies
-→ verify GPU + video
-→ download/cache traffic-sign model
-→ delete stale result
-→ process video1.mp4
-→ save full result to Drive
-→ verify codec
-→ show lightweight preview directly in Colab
+MyDrive/DIP/models/helmet_best.pt
 ```
 
-Default input:
+and is automatically preferred on later runs.
+
+### Vietnamese car license plates
+
+Default detector: `Koushim/yolov8-license-plate-detection`.
+
+Optional VN-specific fine-tuning script:
 
 ```text
-/content/drive/MyDrive/DIP/video1.mp4
+training/train_plate_vn.py
 ```
 
-Full result:
+Dataset: `phms-workspace-ialpp/vietnamese-car-license-plate-dwwrm`, 8,255 images. A successful fine-tune becomes:
 
 ```text
-/content/drive/MyDrive/DIP/outputs/video1_result.mp4
+MyDrive/DIP/models/plate_best.pt
 ```
 
-Detection CSV:
+OCR uses EasyOCR with an alphanumeric allowlist, multi-preprocessing variants, quality gates, Vietnamese car-plate regex validation and vehicle-track voting.
+
+## Persistent Google Drive layout
 
 ```text
-/content/drive/MyDrive/DIP/outputs/video1_result.csv
+MyDrive/DIP/
+├── video1.mp4
+├── models/
+│   ├── best.pt / downloaded public checkpoints
+│   ├── helmet_best.pt       # optional custom fine-tune
+│   ├── plate_best.pt        # optional VN plate fine-tune
+│   └── easyocr/
+├── datasets/
+├── training_runs/
+└── outputs/
+    ├── video1_result.mp4
+    ├── video1_result.csv
+    └── video1_plates/
 ```
 
-To test another video already in `MyDrive/DIP/`, change only this notebook line:
+Detector weights, optional fine-tuned models and OCR weights live on Drive, so Colab runtime loss does not delete them.
 
-```python
-VIDEO_NAME = 'video1.mp4'
+## Google Colab
+
+Open `END_DIP/colab_demo.ipynb` from branch `feature/yolo-traffic-safety`, enable a T4 GPU and use **Runtime → Run all**.
+
+The notebook:
+
+```text
+mount Drive
+→ clone repo
+→ install
+→ cache all model weights in Drive
+→ optional one-time helmet fine-tune
+→ run all 3 tasks
+→ save H.264 result + CSV + best plate crops
+→ show preview directly in Colab
 ```
 
-## CLI
+The notebook ends with a **RECOVERY CELL**. After a Colab disconnect, run only that last cell. It remounts Drive, restores the repo/runtime, reuses the models already saved in `MyDrive/DIP/models`, processes `video1.mp4` again and shows the preview. No retraining is required.
+
+## Default CLI
 
 ```bash
 python main.py \
   --input /content/drive/MyDrive/DIP/video1.mp4 \
   --output-dir /content/drive/MyDrive/DIP/outputs \
   --models-dir /content/drive/MyDrive/DIP/models \
-  --sign-conf 0.25
+  --sign-conf 0.32 \
+  --scene-conf 0.34 \
+  --helmet-conf 0.38 \
+  --plate-conf 0.34
 ```
 
-Useful options:
+## Visual policy
 
-```text
---sign-conf      YOLO confidence threshold
---sign-imgsz     inference size, default 640
---frame-stride   infer every Nth frame, default 1
---dip-enhance    enable mild CLAHE/unsharp preprocessing
---show-hud       display a small time/sign-count HUD
-```
+The saved video shows only:
 
-## Gradio
+- orange: traffic sign box + short English name;
+- green/red: explicit helmet/no-helmet evidence near the rider's head;
+- cyan: car license plate box + stable OCR string when validated.
 
-Optional upload UI:
-
-```bash
-python app.py
-```
-
-The normal `colab_demo.ipynb` flow does not launch Gradio, so **Run all** completes without waiting for an interactive server.
-
-## Source tree
-
-```text
-END_DIP/
-├── main.py
-├── app.py
-├── download_models.py
-├── requirements.txt
-├── colab_demo.ipynb
-├── src/
-│   ├── common.py
-│   ├── config.py
-│   ├── model_manager.py
-│   ├── temporal.py
-│   ├── video_processor.py
-│   ├── detectors/
-│   │   └── traffic_sign.py
-│   └── utils/
-│       ├── dip.py
-│       ├── geometry.py
-│       └── visualization.py
-└── sign_templates/        # original DIP baseline assets
-```
+No full person, motorcycle, car/bus/truck, ROI, or Student ID boxes are rendered.
