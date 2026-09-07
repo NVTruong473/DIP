@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Dict, List
+
 import torch
 from ultralytics import YOLO
 
@@ -10,6 +9,92 @@ from src.common import Detection
 from src.model_manager import ModelManager
 from src.utils.dip import analyze_sign_color, enhance_frame_clahe
 from src.utils.geometry import box_iou
+
+
+# Short English labels for all 56 classes in the VTSR training set.
+# The detector still keeps the official class code in raw_label / CSV metadata.
+ENGLISH_LABELS: Dict[str, str] = {
+    "DP-135": "End of Restrictions",
+    "P-102": "No Entry",
+    "P-103A": "No Cars",
+    "P-103B": "No Left Turn (Cars)",
+    "P-103C": "No Right Turn (Cars)",
+    "P-104": "No Motorcycles",
+    "P-106A": "No Trucks",
+    "P-106B": "Truck Weight Limit",
+    "P-107A": "No Buses",
+    "P-112": "No Pedestrians",
+    "P-115": "Weight Limit",
+    "P-117": "Height Limit",
+    "P-123A": "No Left Turn",
+    "P-123B": "No Right Turn",
+    "P-124A": "No U-Turn",
+    "P-124B": "No U-Turn (Cars)",
+    "P-124C": "No Left Turn / U-Turn",
+    "P-127": "Speed Limit",
+    "P-128": "No Horn",
+    "P-130": "No Stopping / Parking",
+    "P-131A": "No Parking",
+    "P-137": "No Left / Right Turn",
+    "P-245A": "Slow Down",
+    "R-301C": "Left Only",
+    "R-301D": "Right Turn Only",
+    "R-301E": "Left Turn Only",
+    "R-302A": "Keep Right",
+    "R-302B": "Keep Left",
+    "R-303": "Roundabout",
+    "R-407A": "One Way",
+    "R-409": "U-Turn Point",
+    "R-425": "Hospital",
+    "R-434": "Bus Stop",
+    "S-509A": "Safe Height",
+    "W-201A": "Dangerous Bend Left",
+    "W-201B": "Dangerous Bend Right",
+    "W-202A": "Winding Road Left",
+    "W-202B": "Winding Road Right",
+    "W-203B": "Road Narrows Left",
+    "W-203C": "Road Narrows Right",
+    "W-205A": "Crossroads",
+    "W-205B": "Junction Ahead",
+    "W-205D": "Junction Ahead",
+    "W-207A": "Side Road Junction",
+    "W-207B": "Side Road Junction",
+    "W-207C": "Side Road Junction",
+    "W-208": "Priority Road Junction",
+    "W-209": "Traffic Signals Ahead",
+    "W-210": "Gated Railway Crossing",
+    "W-219": "Steep Descent",
+    "W-224": "Pedestrian Crossing",
+    "W-225": "Children",
+    "W-227": "Road Works",
+    "W-233": "Other Danger",
+    "W-235": "Divided Road Ahead",
+    "W-245A": "Slow Down",
+}
+
+
+def canonical_code(value: str) -> str:
+    code = str(value).strip().upper().replace(".", "-").replace("_", "-")
+    while "--" in code:
+        code = code.replace("--", "-")
+    return code
+
+
+def english_name(raw_code: str) -> str:
+    code = canonical_code(raw_code)
+    if code in ENGLISH_LABELS:
+        return ENGLISH_LABELS[code]
+    if code.startswith("DP-"):
+        return "End of Restriction"
+    if code.startswith("P-"):
+        return "Prohibition Sign"
+    if code.startswith("R-"):
+        return "Mandatory Sign"
+    if code.startswith("W-"):
+        return "Warning Sign"
+    if code.startswith("S-"):
+        return "Supplementary Sign"
+    return "Traffic Sign"
 
 
 class TrafficSignDetector:
@@ -27,35 +112,7 @@ class TrafficSignDetector:
         self.tiled = tiled
         self.device = 0 if torch.cuda.is_available() else "cpu"
         self.model_path = manager.sign_model()
-        self.mapping_path = manager.sign_mapping()
         self.model = YOLO(self.model_path, task="detect")
-        self.mapping = self._load_mapping(self.mapping_path)
-
-    @staticmethod
-    def _load_mapping(path: str) -> Dict[str, str]:
-        try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        if not isinstance(data, dict):
-            return {}
-
-        out: Dict[str, str] = {}
-        for key, value in data.items():
-            if isinstance(value, str):
-                out[str(key)] = value
-            elif isinstance(value, dict):
-                text = (
-                    value.get("vi")
-                    or value.get("vn")
-                    or value.get("name_vi")
-                    or value.get("description")
-                    or value.get("name")
-                )
-                out[str(key)] = str(text) if text else str(key)
-            else:
-                out[str(key)] = str(value)
-        return out
 
     def _predict_tile(self, tile, ox: int, oy: int, original_frame) -> List[Detection]:
         source = enhance_frame_clahe(tile) if self.use_dip_enhancement else tile
@@ -80,20 +137,17 @@ class TrafficSignDetector:
             cls = int(box.cls[0])
             conf = float(box.conf[0])
             raw = str(names.get(cls, cls) if isinstance(names, dict) else names[cls])
-            desc_vi = self.mapping.get(raw, raw)
-
-            # Keep the original UTF-8 Vietnamese label. Rendering is handled
-            # with Pillow/TrueType in visualization.py instead of cv2.putText.
-            friendly = f"{raw}: {desc_vi}" if desc_vi != raw else raw
+            code = canonical_code(raw)
 
             roi = original_frame[y1:y2, x1:x2]
             dip = analyze_sign_color(roi)
-            dip["description_vi"] = desc_vi
+            dip["sign_code"] = code
+
             detections.append(
                 Detection(
                     box=(x1, y1, x2, y2),
-                    label=friendly,
-                    raw_label=raw,
+                    label=english_name(code),
+                    raw_label=code,
                     confidence=conf,
                     class_id=cls,
                     extra=dip,
@@ -105,9 +159,10 @@ class TrafficSignDetector:
     def _class_aware_nms(dets: List[Detection], threshold: float = 0.45) -> List[Detection]:
         out: List[Detection] = []
         groups: Dict[str, List[Detection]] = {}
-        for d in dets:
-            groups.setdefault(d.raw_label or d.label, []).append(d)
-        for _, group in groups.items():
+        for det in dets:
+            groups.setdefault(det.raw_label or det.label, []).append(det)
+
+        for group in groups.values():
             remaining = sorted(group, key=lambda d: d.confidence, reverse=True)
             while remaining:
                 best = remaining.pop(0)
@@ -120,9 +175,8 @@ class TrafficSignDetector:
         if not self.tiled or w < 1000:
             return self._predict_tile(frame, 0, 0, frame)
 
-        # Two overlapping vertical tiles make small distant signs ~1.6x larger
-        # than a full 1920x1080 -> 640 letterbox inference, while adding only
-        # one extra pass through the lightweight sign model.
+        # Two overlapping vertical tiles preserve more pixels for small/distant
+        # traffic signs in 1080p road footage.
         tile_w = int(round(w * 0.62))
         starts = [0, max(0, w - tile_w)]
         detections: List[Detection] = []
