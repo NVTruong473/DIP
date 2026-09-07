@@ -9,9 +9,13 @@ from src.model_manager import ModelManager
 
 
 class SceneDetector:
-    """COCO person/bicycle/motorcycle detector with ByteTrack IDs."""
+    """COCO car/bus/truck detector with ByteTrack IDs.
 
-    def __init__(self, manager: ModelManager, conf: float = 0.30, imgsz: int = 640, classes=(0, 1, 3)):
+    Vehicle boxes are used internally to decide whether a detected plate belongs
+    to a four-wheel vehicle. They do not need to be rendered in the final video.
+    """
+
+    def __init__(self, manager: ModelManager, conf: float = 0.30, imgsz: int = 640, classes=(2, 5, 7)):
         self.conf = conf
         self.imgsz = imgsz
         self.classes = list(classes)
