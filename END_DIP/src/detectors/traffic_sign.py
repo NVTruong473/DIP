@@ -12,7 +12,6 @@ from src.utils.geometry import box_iou
 
 
 def compact_label(name: str) -> str:
-    """Keep English category labels readable and short on video."""
     s = re.sub(r"\s+", " ", str(name)).strip()
     replacements = {
         "No Stopping & No Parking": "No Stop/Parking",
@@ -39,6 +38,21 @@ class TrafficSignDetector:
         self.device = 0 if torch.cuda.is_available() else "cpu"
         self.model = YOLO(manager.sign_model())
 
+    @staticmethod
+    def _plausible_box(x1, y1, x2, y2, frame_w, frame_h):
+        bw, bh = max(1, x2-x1), max(1, y2-y1)
+        aspect = bw/float(bh)
+        area_ratio = (bw*bh)/float(frame_w*frame_h)
+        # Reject tiny noise and implausibly huge/elongated detections. Limits are
+        # permissive enough for rectangular supplementary/information signs.
+        if bw < 7 or bh < 7:
+            return False
+        if not 0.20 <= aspect <= 5.0:
+            return False
+        if area_ratio > 0.16:
+            return False
+        return True
+
     def _predict_tile(self, tile, ox: int, oy: int, original_frame) -> List[Detection]:
         result = self.model.predict(tile, conf=self.conf, imgsz=self.imgsz, device=self.device, verbose=False)[0]
         out: List[Detection] = []
@@ -50,6 +64,8 @@ class TrafficSignDetector:
             tx1, ty1, tx2, ty2 = map(int, box.xyxy[0].tolist())
             x1, y1 = max(0, tx1+ox), max(0, ty1+oy)
             x2, y2 = min(w-1, tx2+ox), min(h-1, ty2+oy)
+            if not self._plausible_box(x1,y1,x2,y2,w,h):
+                continue
             cls = int(box.cls[0])
             raw = str(names.get(cls, cls) if isinstance(names, dict) else names[cls])
             roi = original_frame[y1:y2, x1:x2]
