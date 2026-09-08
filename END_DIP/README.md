@@ -1,6 +1,6 @@
-# END_DIP — Robust Traffic Sign Detection
+# END_DIP — Robust Traffic Sign Detection v3
 
-Final scope on branch `feature/yolo-traffic-safety`: **traffic-sign detection only** for the current `MyDrive/DIP/video1.mp4`.
+Final scope on branch `feature/yolo-traffic-safety`: **traffic-sign detection only** for `MyDrive/DIP/video1.mp4`.
 
 The active implementation is intentionally contained in one file:
 
@@ -8,53 +8,52 @@ The active implementation is intentionally contained in one file:
 END_DIP/colab_demo.ipynb
 ```
 
-## Key design
+## Why v3 changed the architecture
 
-- Primary: `liamxdev/vtsr` for the sign classes that already worked well on the current video.
-- Secondary: `star092304/traffic-sign-detection-vietnam-yolo` YOLO11s for complementary Vietnamese traffic-sign coverage.
-- Nearby signs: global inference every frame.
-- Distant signs: two overlapping upper-road crops are processed separately, giving roughly 1.7–1.9× more effective sign pixels than a full-frame pass.
-- DIP rescue: red/blue/yellow + contour geometry proposes at most one extra crop every three frames; YOLO still has to confirm it.
-- Template bank: legacy project templates plus Vietnamese sign artwork cached in Drive. Templates only verify a YOLO-proposed class and never classify an object by themselves.
-- False-positive controls: geometry gate, color/shape evidence, template support, cross-pass conflict suppression, NMS-style merging, and short temporal confirmation.
-- Bounding boxes: EMA is applied only to a real current-frame detection. Missing detections are never extrapolated or rendered as ghost boxes.
-- Labels: compact English only.
+Reviewing the latest rendered video showed that the dominant failure was no longer just missed far-away signs. The more serious issue was **semantic conflict**: the same physical sign could receive different labels from different passes/models, producing stacked labels and visibly wrong classes.
 
-## Important TorchScript fix
+v3 therefore removes the previous two-model semantic ensemble.
 
-`vtsr.torchscript` is a static export whose detection head expects the native 640×640 anchor layout. Calling the model at arbitrary sizes such as 768 or 896 can fail with an anchor tensor mismatch (`8400` vs another anchor count).
+## v3 pipeline
 
-The notebook therefore manually letterboxes **every primary input to exactly 640×640**. Far-sign zoom is created by cropping a smaller scene region first, not by changing the TorchScript inference size.
+- **One semantic model:** `star092304/traffic-sign-detection-vietnam-yolo` (YOLO11s, 82 Vietnam traffic-sign classes).
+- **Global pass every frame** for nearby/medium signs.
+- **Three overlapping upper-road slices every frame** for far signs, following the sliced-inference idea used by SAHI: crop first, then infer at high resolution.
+- **Class-agnostic geometry clustering first.** Predictions are grouped as the same physical object before deciding the class.
+- **Weighted-box-fusion style localization.** Overlapping global/slice boxes are confidence-weighted into one current-frame box.
+- **Two-stage refinement.** If class evidence conflicts, the fused candidate is cropped with padding and re-run through the same YOLO11s model at a larger relative scale.
+- **DIP is validation only.** HSV red/blue/yellow/white ratios are soft class plausibility priors; they never create a class.
+- **Official Vietnamese sign templates** are downloaded/cached in Drive and used only as a small tie-breaker for ambiguous YOLO classes.
+- **Class-agnostic temporal tracks.** Geometry tracks are matched independent of the current predicted label, then class votes are accumulated over real detections.
+- **Label hysteresis.** Once a class is stable, it does not switch unless a competing class wins strongly for multiple frames.
+- **Generic far-sign mode.** If object presence is stable but class evidence is weak, output `Sign` rather than a confident wrong class.
+- **No ghost boxes.** Missing current-frame detections are never extrapolated or drawn.
+- **Compact visualization.** Thin boxes, small English labels, no large orange label blocks; confidence remains in CSV.
 
-Before the full 3087-frame loop, the notebook runs a **smoke test** on:
+## Dataset/model note
 
-1. primary global 640×640,
-2. primary left/right far crops 640×640,
-3. secondary global,
-4. secondary far crop.
+The YOLO11s model is trained on the Vietnam Traffic Sign Detection dataset: 10,157 images and 82 classes. The model card reports precision 0.9642, recall 0.9615 and mAP50 0.9806.
 
-If the primary TorchScript still fails on a future Colab runtime, the notebook automatically disables it and continues using the dynamic YOLO11s `.pt` model instead of crashing.
+The dataset label `Turn Right Only` is displayed as `Keep Right` because its Vietnamese description is `Đi về bên phải`, while the dataset has a separate `Turn Right` class described as `Rẽ phải`.
 
-## Google Drive persistence
+## Drive persistence / cleanup
 
-Weights and template cache are stored in:
+On Run all, the notebook keeps only the v3 runtime artifacts:
 
 ```text
 MyDrive/DIP/models/
-├── traffic_sign_primary/
-├── traffic_sign_secondary/
-└── sign_templates/
+├── traffic_sign_yolo11s/
+└── sign_templates_v3/
 ```
 
-No training is required. After a Colab disconnect, open the notebook again and use `Runtime → Run all`; cached files in Drive are reused.
+It removes obsolete traffic-sign primary/secondary folders and previous helmet/plate/OCR/scene artifacts. No training is required. After a Colab disconnect, reopen the notebook and use `Runtime → Run all`; cached YOLO11s weights and templates are reused.
 
-Obsolete helmet, plate, OCR and scene-model artifacts are removed by the setup cell when present.
-
-## Output
+## Outputs
 
 ```text
 MyDrive/DIP/outputs/video1_result.mp4
 MyDrive/DIP/outputs/video1_result.csv
+MyDrive/DIP/outputs/video1_audit.jpg
 ```
 
-The final MP4 is encoded as H.264/yuv420p and the last cell creates a smaller inline preview for Google Colab.
+`video1_audit.jpg` contains representative `ORIGINAL | RESULT` pairs so later tuning can be based on evidence instead of blind threshold changes.
