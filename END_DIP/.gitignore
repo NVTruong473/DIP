@@ -1,19 +1,12 @@
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+*.pyd
 .ipynb_checkpoints/
-.venv/
-venv/
-
-# Large data and generated artifacts belong in Google Drive, not GitHub.
+outputs/
 models/
 datasets/
-outputs/
 training_runs/
-runs/
-*.pt
-*.onnx
-*.engine
-*.torchscript
 *.mp4
 *.avi
-*.csv
+*.mov
