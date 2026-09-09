@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+outputs/
+models/
+datasets/
+training_runs/
+*.mp4
+*.avi
+*.mov
